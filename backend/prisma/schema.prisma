@@ -1,0 +1,96 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  email        String   @unique
+  passwordHash String
+  role         String   @default("ADMIN")
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  imports      ImportJob[]
+  mappings     ColumnMapping[]
+}
+
+model BitrixConfiguration {
+  id                  String   @id @default(uuid()) @db.Uuid
+  portalUrl           String
+  webhookUrlEncrypted String
+  isActive            Boolean  @default(true)
+  lastTestedAt        DateTime?
+  connectionStatus    String   @default("UNKNOWN")
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+}
+
+model ImportJob {
+  id             String         @id @default(uuid()) @db.Uuid
+  fileName       String
+  filePath       String
+  importMode     String         @default("CREATE_UPDATE")
+  type           String         @default("PRODUCTS")
+  status         String         @default("PENDING")
+  totalRows      Int            @default(0)
+  processedRows  Int            @default(0)
+  successfulRows Int            @default(0)
+  failedRows     Int            @default(0)
+  skippedRows    Int            @default(0)
+  mappingJson    Json?
+  startedAt      DateTime?
+  completedAt    DateTime?
+  createdAt      DateTime       @default(now())
+  createdBy      User?          @relation(fields: [createdById], references: [id])
+  createdById    String?        @db.Uuid
+  records        ImportRecord[]
+}
+
+model ImportRecord {
+  id              String    @id @default(uuid()) @db.Uuid
+  importJob       ImportJob @relation(fields: [importJobId], references: [id], onDelete: Cascade)
+  importJobId     String    @db.Uuid
+  rowNumber       Int
+  sku             String?
+  productName     String?
+  status          String    @default("PENDING")
+  bitrixProductId String?
+  errorMessage    String?
+  bitrixError     String?
+  rawData         Json?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([importJobId])
+  @@index([status])
+  @@index([sku])
+}
+
+model ColumnMapping {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String
+  mappingJson Json?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  createdBy   User?    @relation(fields: [createdById], references: [id])
+  createdById String?  @db.Uuid
+}
+
+model DebugLog {
+  id        String   @id @default(uuid()) @db.Uuid
+  level     String   @default("INFO")
+  source    String   @default("SYSTEM")
+  message   String
+  details   Json?
+  createdAt DateTime @default(now())
+
+  @@index([level])
+  @@index([source])
+  @@index([createdAt])
+}

@@ -1,0 +1,4 @@
+﻿Invoice No,Subject,Customer,Amount,Currency,Status,Bill Date,Due Date,Notes
+INV-9001,Office supplies order,Aspire Traders,14500.50,INR,S,2026-08-01,2026-08-15,First sample
+INV-9002,Printer cartridges,Global Tech India,8200.00,INR,P,2026-08-03,2026-08-20,Second sample
+INV-9003,Network hardware,Nexa Solutions,25750.00,INR,N,2026-08-05,2026-08-25,Third sample
