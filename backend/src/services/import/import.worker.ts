@@ -3,6 +3,9 @@ import fs from 'fs';
 import { prisma } from '../../config/database';
 import { importService } from './import.service';
 import { invoiceImportService } from './invoiceImport.service';
+import { stockReceiptImportService } from './stockReceiptImport.service';
+import { BitrixClient } from '../bitrix/BitrixClient';
+import { BitrixStockReceiptService, BitrixStore } from '../bitrix/BitrixStockReceiptService';
 import { createImportWorker, ImportJobData, ImportType } from '../../queues/import.queue';
 import { logger } from '../../utils/logger';
 import { debugLog } from '../../services/debug/debugLog.service';
@@ -14,6 +17,52 @@ let activeWorker: Worker | null = null;
 
 function extractRowData(record: any, mapping: any, importType: ImportType): any {
   const rawData = (record.rawData as any) || {};
+
+  if (importType === 'STOCK_RECEIPTS' || mapping.quantityArrivedField || mapping.quantityField) {
+    const num = (v: any) => (v !== undefined && v !== '' && v !== null && !isNaN(Number(v)) ? Number(v) : undefined);
+    const qtyCol = mapping.quantityArrivedField || mapping.quantityField;
+    const purchaseCol = mapping.purchasePriceField || mapping.priceField;
+    const salesCol = mapping.salesPriceField || mapping.priceField;
+
+    let barcodeVal = mapping.barcodeField ? String(rawData[mapping.barcodeField] ?? '').trim() : undefined;
+    if (!barcodeVal) {
+      for (const [k, v] of Object.entries(rawData)) {
+        if (k.startsWith('_')) continue;
+        const kLower = k.toLowerCase().trim();
+        if (kLower.includes('barcode') || kLower.includes('bar code') || kLower === 'ean' || kLower === 'upc') {
+          if (v !== undefined && v !== null && String(v).trim()) {
+            barcodeVal = String(v).trim();
+            break;
+          }
+        }
+      }
+    }
+    if (!barcodeVal) {
+      for (const [k, v] of Object.entries(rawData)) {
+        if (k.startsWith('_')) continue;
+        const kLower = k.toLowerCase().trim();
+        if ((kLower === 'code' || kLower === 'item code' || kLower === 'part number' || kLower === 'part no') && k !== mapping.skuField) {
+          if (v !== undefined && v !== null && String(v).trim()) {
+            barcodeVal = String(v).trim();
+            break;
+          }
+        }
+      }
+    }
+
+    return {
+      sku: mapping.skuField ? String(rawData[mapping.skuField] ?? '').trim() : '',
+      name: mapping.nameField ? String(rawData[mapping.nameField] ?? '').trim() : '',
+      barcode: barcodeVal,
+      purchasePrice: purchaseCol ? num(rawData[purchaseCol]) : undefined,
+      salesPrice: salesCol ? num(rawData[salesCol]) : undefined,
+      quantityArrived: qtyCol ? (num(rawData[qtyCol]) ?? 0) : 0,
+      warehouse: mapping.warehouseField ? String(rawData[mapping.warehouseField] ?? '').trim() : undefined,
+      quantityDestination: mapping.quantityDestinationField ? num(rawData[mapping.quantityDestinationField]) : undefined,
+      total: mapping.totalField ? num(rawData[mapping.totalField]) : undefined,
+      defaultStoreId: mapping.defaultStoreId ? Number(mapping.defaultStoreId) : 1,
+    };
+  }
 
   if (importType === 'INVOICES') {
     const num = (v: any) => (v !== undefined && v !== '' ? Number(v) : undefined);
@@ -83,6 +132,54 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
       recordCount: await prisma.importRecord.count({ where: { importJobId, status: 'PENDING' } }),
     });
 
+    let bitrixDocumentId: number | undefined;
+    let storesList: BitrixStore[] = [];
+    const hasInventoryStock = importType === 'STOCK_RECEIPTS' || !!effectiveMapping.quantityField || !!effectiveMapping.quantityArrivedField;
+
+    if (hasInventoryStock) {
+      try {
+        const client = await BitrixClient.fromDbConfiguration();
+        const stockReceiptService = new BitrixStockReceiptService(client);
+        storesList = await stockReceiptService.getStores();
+
+        if (importJob.bitrixDocumentId) {
+          try {
+            const check = await client.callMethod('catalog.document.list', { filter: { id: Number(importJob.bitrixDocumentId) } });
+            const d = (check?.documents || [])[0];
+            if (d && d.status === 'Y') {
+              const doc = await stockReceiptService.createStockReceiptDocument(
+                `Stock Receipt (Retry): ${importJob.fileName} (${new Date().toLocaleDateString()})`,
+                `Retried items for Job: ${importJobId}`
+              );
+              bitrixDocumentId = doc.id;
+              await prisma.importJob.update({
+                where: { id: importJobId },
+                data: { bitrixDocumentId: String(bitrixDocumentId) },
+              });
+              logger.info(`Created new supplementary stock receipt doc ID ${bitrixDocumentId} for retried items`);
+            } else {
+              bitrixDocumentId = Number(importJob.bitrixDocumentId);
+            }
+          } catch {
+            bitrixDocumentId = Number(importJob.bitrixDocumentId);
+          }
+        } else {
+          const doc = await stockReceiptService.createStockReceiptDocument(
+            `Stock Receipt: ${importJob.fileName} (${new Date().toLocaleDateString()})`,
+            `Imported via Bitrix24 Middleware (Job: ${importJobId})`
+          );
+          bitrixDocumentId = doc.id;
+          await prisma.importJob.update({
+            where: { id: importJobId },
+            data: { bitrixDocumentId: String(bitrixDocumentId) },
+          });
+          logger.info(`Created Bitrix stock receipt document ID ${bitrixDocumentId} for job ${importJobId}`);
+        }
+      } catch (docErr: any) {
+        logger.warn({ err: docErr }, 'Failed to initialize Bitrix stock receipt document; continuing with catalog sync');
+      }
+    }
+
     // Load pending records, draining the queue until none remain.
     // NOTE: skip is always 0 because processed records leave the PENDING set;
     // paginating with an accumulating offset skips live records and strands them.
@@ -116,9 +213,11 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
             data: { status: 'PROCESSING' },
           });
 
-          const result = importType === 'INVOICES'
-            ? await invoiceImportService.processInvoiceRecord(rowData, effectiveMapping, importMode)
-            : await importService.processRecord(rowData, effectiveMapping, importMode);
+          const result = hasInventoryStock
+            ? await stockReceiptImportService.processRecord(rowData, effectiveMapping, importMode, bitrixDocumentId, storesList)
+            : importType === 'INVOICES'
+              ? await invoiceImportService.processInvoiceRecord(rowData, effectiveMapping, importMode)
+              : await importService.processRecord(rowData, effectiveMapping, importMode);
 
           const rec = result as any;
 
@@ -127,6 +226,11 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
             data: {
               status: result.status,
               ...(rec.bitrixProductId ? { bitrixProductId: rec.bitrixProductId } : {}),
+              ...(rec.bitrixDocumentId ? { bitrixDocumentId: rec.bitrixDocumentId } : {}),
+              ...(rec.warehouseId !== undefined ? { warehouseId: rec.warehouseId } : {}),
+              ...(rec.quantityArrived !== undefined ? { quantityArrived: rec.quantityArrived } : {}),
+              ...(rec.purchasePrice !== undefined ? { purchasePrice: rec.purchasePrice } : {}),
+              ...(rec.salesPrice !== undefined ? { salesPrice: rec.salesPrice } : {}),
               ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
               ...(result.bitrixError ? { bitrixError: result.bitrixError } : {}),
             },
@@ -208,6 +312,24 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
         where: { id: importJobId },
         data: { failedRows: { increment: stuck.count }, processedRows: { increment: stuck.count } },
       });
+    }
+
+    // Conduct stock receipt document in Bitrix24 if applicable
+    if (bitrixDocumentId) {
+      try {
+        const client = await BitrixClient.fromDbConfiguration();
+        const stockReceiptService = new BitrixStockReceiptService(client);
+        const conductRes = await stockReceiptService.conductDocument(bitrixDocumentId);
+        if (conductRes.success) {
+          logger.info(`Conducted Bitrix stock receipt document ID ${bitrixDocumentId}`);
+          debugLog.info('WORKER', `Conducted Bitrix stock receipt document ID ${bitrixDocumentId}`);
+        } else {
+          logger.warn(`Could not conduct Bitrix stock receipt document ID ${bitrixDocumentId}: ${conductRes.error}`);
+          debugLog.warn('WORKER', `Could not conduct Bitrix stock receipt document ${bitrixDocumentId}: ${conductRes.error}`);
+        }
+      } catch (err: any) {
+        logger.warn({ err }, 'Error during stock receipt document conducting');
+      }
     }
 
     // Determine final job status

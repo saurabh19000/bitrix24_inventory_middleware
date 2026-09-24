@@ -4,22 +4,28 @@ import StatusBadge from './StatusBadge';
 
 interface ImportProgressProps {
   importId: string;
+  onComplete?: () => void;
 }
 
-export default function ImportProgress({ importId }: ImportProgressProps) {
+export default function ImportProgress({ importId, onComplete }: ImportProgressProps) {
   const [progress, setProgress] = useState<any>(null);
   const [error, setError] = useState('');
+  const [hasCompleted, setHasCompleted] = useState(false);
 
   const fetchProgress = useCallback(async () => {
     try {
       const res = await api.get(`/imports/${importId}`);
       if (res.data.success) {
         setProgress(res.data.data);
+        if (!hasCompleted && ['COMPLETED', 'COMPLETED_WITH_ERRORS', 'FAILED'].includes(res.data.data.status)) {
+          setHasCompleted(true);
+          onComplete?.();
+        }
       }
     } catch (err: any) {
       setError(err.response?.data?.message || 'Failed to fetch progress');
     }
-  }, [importId]);
+  }, [importId, onComplete, hasCompleted]);
 
   useEffect(() => {
     fetchProgress();

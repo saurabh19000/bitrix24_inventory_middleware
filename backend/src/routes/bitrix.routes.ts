@@ -11,5 +11,6 @@ router.get('/products/fields', bitrixController.getProductFields);
 router.get('/inventory/fields', bitrixController.getInventoryFields);
 router.get('/stores', bitrixController.getStores);
 router.get('/invoice-fields', bitrixController.getInvoiceFields);
+router.get('/stock-receipt-fields', bitrixController.getStockReceiptFields);
 
 export default router;

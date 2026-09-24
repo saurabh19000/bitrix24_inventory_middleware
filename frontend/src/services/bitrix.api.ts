@@ -20,3 +20,18 @@ export async function getInvoiceFields(): Promise<ApiResponse<{ fields: any[]; s
   const res = await api.get('/bitrix/invoice-fields');
   return res.data;
 }
+
+export async function getStores(): Promise<ApiResponse<any[]>> {
+  const res = await api.get('/bitrix/stores');
+  return res.data;
+}
+
+export async function getStockReceiptFields(): Promise<ApiResponse<{
+  stockReceiptFields: any[];
+  catalogFields: any[];
+  stores: any[];
+  currency: string;
+}>> {
+  const res = await api.get('/bitrix/stock-receipt-fields');
+  return res.data;
+}

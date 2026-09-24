@@ -1,423 +1,420 @@
-# Bitrix24 Excel Inventory Middleware
+# Bitrix24 Inventory & Invoice Middleware
 
-A production-ready middleware application that imports Excel inventory files into Bitrix24 through an authenticated admin dashboard. Built with **Node.js + Express + React + PostgreSQL + Prisma + Redis/BullMQ + Docker**.
+A production-ready, full-stack middleware application designed to ingest Excel (`.xlsx`, `.xls`) and `.csv` files, validate records, map column headers, and synchronize product catalogs, prices, stock quantities, and classic CRM invoices into **Bitrix24** via its REST API.
 
-## Architecture
-
-```
-Excel File → React Admin Dashboard → Express API → Auth Middleware → Import Controller
-  → Import Service → Excel Parser → Validation → Column Mapping → BullMQ Queue
-  → Import Worker → Bitrix Service Layer → Bitrix24 REST API
-  → Product/Catalog API + Inventory/Warehouse API → PostgreSQL
-```
-
-The frontend **never** communicates directly with Bitrix24. All Bitrix communication happens through the Express backend, which loads the webhook configuration from the database (encrypted).
-
-## Container Stack
-
-| Service   | Container                 | Port  | Purpose                         |
-|-----------|---------------------------|-------|---------------------------------|
-| PostgreSQL| bitrix_inventory_postgres | 5432  | Database (persistent volume)    |
-| Redis     | bitrix_inventory_redis    | 6379  | BullMQ queue + caching          |
-| Backend   | bitrix_inventory_backend  | 5000  | Express API + import worker     |
-| Frontend  | bitrix_inventory_frontend | 3000  | React dashboard (nginx)         |
+Built with **Node.js, Express, TypeScript, React 18, PostgreSQL, Prisma ORM, Redis, BullMQ, and Docker**.
 
 ---
 
-## Quick Start (Docker)
+## Table of Contents
 
-```bash
-docker compose up -d --build
-docker compose ps
-```
-
-You should see 4 healthy containers: `frontend`, `backend`, `postgres`, `redis`.
-
-Then open **http://localhost:3000** and log in with:
-
-- **Email:** `admin@system.com`
-- **Password:** `Admin@123456`
-
-> Change these via the `ADMIN_EMAIL` / `ADMIN_PASSWORD` environment variables.
+- [1. Architecture Overview](#1-architecture-overview)
+- [2. Technology Stack](#2-technology-stack)
+- [3. Complete Feature & Functional Breakdown](#3-complete-feature--functional-breakdown)
+  - [3.1 Authentication & User Management](#31-authentication--user-management)
+  - [3.2 Bitrix24 Webhook Configuration & Security](#32-bitrix24-webhook-configuration--security)
+  - [3.3 File Ingestion, Parsing & Data Integrity](#33-file-ingestion-parsing--data-integrity)
+  - [3.4 Product & Inventory Import Wizard](#34-product--inventory-import-wizard)
+  - [3.5 Invoice Import Wizard](#35-invoice-import-wizard)
+  - [3.6 Stock Receipt & Product Catalog Synchronization Wizard](#36-stock-receipt--product-catalog-synchronization-wizard)
+  - [3.7 BullMQ Asynchronous Processing Pipeline](#37-bullmq-asynchronous-processing-pipeline)
+  - [3.8 Import Tracking, Error Reporting & Retry Engine](#38-import-tracking-error-reporting--retry-engine)
+  - [3.9 Live Diagnostic Debug Console](#39-live-diagnostic-debug-console)
+  - [3.10 Admin Dashboard](#310-admin-dashboard)
+- [4. Database Architecture (Prisma Schema)](#4-database-architecture-prisma-schema)
+- [5. Bitrix24 REST API Integration Reference](#5-bitrix24-rest-api-integration-reference)
+- [6. REST API Endpoints Reference](#6-rest-api-endpoints-reference)
+- [7. Configuration & Environment Variables](#7-configuration--environment-variables)
+- [8. Deployment & Getting Started](#8-deployment--getting-started)
+  - [8.1 Quick Start with Docker](#81-quick-start-with-docker)
+  - [8.2 Local Development Setup](#82-local-development-setup)
+- [9. Known Platform Considerations & Limitations](#9-known-platform-considerations--limitations)
 
 ---
 
-## Local Development (without Docker)
+## 1. Architecture Overview
 
-### Prerequisites
-- Node.js 18+
-- PostgreSQL (running locally) — or use the dockerized one
-- Redis — or use the dockerized one
+The system strictly decouples the user-facing admin portal from direct Bitrix24 interactions. The frontend talks exclusively to the authenticated Express API. The backend orchestrates asynchronous execution via Redis/BullMQ workers, ensuring large files never time out the HTTP request and Bitrix rate limits are respected.
 
-### 1. Start infrastructure containers
-```bash
-docker compose up -d postgres redis
 ```
-
-### 2. Configure environment
-```bash
-cd backend
-cp .env.example .env
-# Edit .env: set DATABASE_URL to point at `localhost:5432`
-```
-
-### 3. Backend
-```bash
-cd backend
-npm install
-npx prisma migrate dev
-npx prisma db seed        # creates admin@system.com
-npm run dev               # http://localhost:5000
-```
-
-### 4. Frontend
-```bash
-cd frontend
-npm install
-npm run dev               # http://localhost:3000
+                              ┌────────────────────────────────────────┐
+                              │            React Frontend              │
+                              │     (Vite + Tailwind + React Router)   │
+                              └───────────────────┬────────────────────┘
+                                                  │ HTTPS / JSON
+                                                  ▼
+                              ┌────────────────────────────────────────┐
+                              │          Express API Backend           │
+                              │    (Auth / Rate Limiting / Multer)     │
+                              └───────┬──────────────────────┬─────────┘
+                                      │                      │
+                     Enqueues Job     │                      │ SQL Queries
+                                      ▼                      ▼
+                   ┌───────────────────────┐      ┌─────────────────────────┐
+                   │     Redis + BullMQ    │      │   PostgreSQL + Prisma   │
+                   │    (import-queue)     │      │   (Jobs, Records, Logs) │
+                   └──────────┬────────────┘      └─────────────────────────┘
+                              │
+                    Dequeues  │
+                              ▼
+                   ┌───────────────────────┐
+                   │  Async Import Worker  │
+                   │ (Controlled Concurrency)
+                   └──────────┬────────────┘
+                              │ Bitrix REST API (Rate-limit aware with retries)
+                              ▼
+                   ┌───────────────────────┐
+                   │    Bitrix24 Portal    │
+                   │ (Catalog/Price/CRM)   │
+                   └───────────────────────┘
 ```
 
 ---
 
-## Prisma Commands
+## 2. Technology Stack
 
-```bash
-npx prisma generate     # Generate the Prisma client
-npx prisma migrate dev  # Create + apply migrations (development)
-npx prisma migrate deploy  # Apply migrations (production / Docker)
-npx prisma studio       # Interactive DB inspection UI
-npx prisma db seed      # Create the initial admin user
+### Backend
+- **Runtime & Language:** Node.js 20 LTS, TypeScript 5.5
+- **Framework:** Express 4.21
+- **Database & ORM:** PostgreSQL 15+, Prisma ORM 5.19
+- **Job Queue:** BullMQ 5.12 backed by Redis 7
+- **Excel & CSV Engine:** ExcelJS 4.4 + custom streaming CSV parser
+- **Security & Crypto:** Node `crypto` (AES-256-GCM), bcrypt, jsonwebtoken, Helmet, express-rate-limit
+- **Logging:** Pino 9 + Pino-pretty + PostgreSQL-backed `DebugLog` service
+
+### Frontend
+- **Framework & Tooling:** React 18, Vite 5, TypeScript 5.5
+- **Routing:** React Router DOM v6
+- **Styling:** Tailwind CSS 3.4
+- **Forms & Validation:** React Hook Form 7, Zod 3.23
+- **Notifications & Charts:** React Hot Toast, Recharts 2.12
+
+### Infrastructure & Orchestration
+- **Containerization:** Docker & Docker Compose
+- **Web Server:** Nginx (frontend reverse proxy and static asset delivery)
+
+---
+
+## 3. Complete Feature & Functional Breakdown
+
+### 3.1 Authentication & User Management
+- **JWT Cookie Auth:** Authenticates administrators via secure HTTP-only cookies (`COOKIE_SECURE` flag customizable for production TLS or development plain HTTP).
+- **Auto-Provisioning Seed:** On boot, [`backend/src/server.ts`](backend/src/server.ts) automatically hashes and seeds the default administrator account defined in `ADMIN_EMAIL` and `ADMIN_PASSWORD` if it does not already exist.
+- **Route Guarding:** Frontend [`ProtectedRoute`](frontend/src/App.tsx) and backend [`authMiddleware`](backend/src/middleware/auth.middleware.ts) guarantee unauthorized callers cannot access APIs or dashboard views.
+
+### 3.2 Bitrix24 Webhook Configuration & Security
+- **AES-256-GCM Encryption:** Inbound Bitrix webhooks contain authentication tokens. They are encrypted using `BITRIX_ENCRYPTION_KEY` before saving into the database.
+- **Zero Exposure:** Webhook URLs are never returned in plaintext to the frontend or printed into logs. The UI masks the webhook as `******************************`.
+- **Live Connection Verification:** The admin can test the webhook connectivity at any time via [`BitrixClient.testConnection`](backend/src/services/bitrix/BitrixClient.ts). It probes the portal's `scope` endpoint, validates status, and stamps `lastTestedAt`.
+- **Automatic Throttle Recovery:** If Bitrix returns `QUERY_LIMIT_EXCEEDED` or `OPERATION_LIMIT` (even over HTTP 200), [`BitrixClient`](backend/src/services/bitrix/BitrixClient.ts) intercepts the response, applies exponential backoff, and automatically retries before failing.
+
+### 3.3 File Ingestion, Parsing & Data Integrity
+- **Multi-Format Support:** Accepts `.xlsx`, `.xls`, and `.csv` files up to `MAX_FILE_SIZE_MB` (default 10 MB).
+- **String Preservation (Leading Zeros):** Identifiers such as SKU `000123` or Barcode `089012345` are read as raw text and never converted into numbers.
+- **Robust Quoted CSV Parsing:** [`ExcelService.parseCsv`](backend/src/services/excel/excel.service.ts) features a character-by-character state machine correctly handling commas inside double quotes, escaped quotes, and multi-line rows.
+- **Duplicate & Constraint Validation:** [`ExcelValidator`](backend/src/services/excel/excel.validator.ts) inspects records prior to queueing. It flags missing required fields, non-numeric values, negative prices/quantities, and finds duplicate SKUs/Invoice numbers with exact row references.
+- **Auto-Mapping Engine:** [`MappingService`](backend/src/services/excel/mapping.service.ts) inspects column names using a comprehensive keyword dictionary and Levenshtein distance fuzzy matching to pre-select mappings.
+
+### 3.4 Product & Inventory Import Wizard (`/inventory/import`)
+A 6-step workflow designed for catalog stock and product data:
+1. **Upload:** Drag-and-drop or select `.xlsx`, `.xls`, `.csv`.
+2. **Preview:** Instant table preview displaying headers, total rows, and the first 50 records.
+3. **Map Columns:** Visual field mapping between Excel columns and Bitrix fields (SKU, Product Name, Quantity, Base Price, Barcode).
+4. **Confirm & Mode Selection:** Choose import policy:
+   - `Create + Update` *(default)*: Updates existing items, creates new items.
+   - `Create Only`: Only adds items that do not exist in Bitrix.
+   - `Update Only`: Only modifies items that already exist in Bitrix.
+5. **Import:** Job is stored in the database, records are initialized as `PENDING`, and the job is enqueued in BullMQ.
+6. **Live Progress:** Real-time polling showing processed, successful, failed, and skipped row counters with progress percentage.
+
+### 3.5 Invoice Import Wizard (`/invoices/import`)
+A specialized 6-step import pipeline for Bitrix24's classic CRM invoice entity (`crm.invoice.*`):
+- **Mapped Fields:**
+  - `ACCOUNT_NUMBER`: Invoice reference identifier (match key).
+  - `ORDER_TOPIC`: Subject or order description.
+  - `CLIENT`: Customer or client company name.
+  - `PRICE`: Total invoice amount.
+  - `CURRENCY`: 3-letter currency code (e.g. `USD`, `INR`, `EUR`).
+  - `STATUS_ID`: Bitrix status (`N` = New, `S` = Sent, `P` = Paid, `D` = Unpaid).
+  - `DATE_BILL` & `DATE_PAY_BEFORE`: Issue and due dates (normalized to `YYYY-MM-DD`).
+  - `COMMENT`: Notes/remarks.
+- **Idempotency:** Matches existing invoices by `ACCOUNT_NUMBER` via `crm.invoice.list`. Existing records are updated with changed fields; new invoices are created via `crm.invoice.add`.
+- **Permission Diagnostics:** If the Bitrix webhook lacks CRM Invoices permission, the system captures the failure with an actionable diagnostic message.
+
+### 3.6 Stock Receipt & Product Catalog Synchronization Wizard (`/inventory/stock-receipt`)
+A modern, end-to-end import pipeline connecting supplier stock arrival spreadsheets directly to **Bitrix24 Inventory Management Stock Receipts** and the **Product Catalog**:
+- **Dynamic Field Discovery:**
+  - Calls `GET /api/bitrix/stock-receipt-fields` upon upload to inspect live Bitrix24 document schema (`catalog.document.element.getFields`), catalog product schema (`catalog.product.getFields`), and portal warehouses (`catalog.store.list`).
+  - Supports offline/pre-configured environments with robust core schema fallbacks.
+- **Stock Receipt Field Mapping:**
+  - `PRODUCT_NAME` *(Required)*: Catalog item name (e.g. "iPhone 15 Pro Max 256GB").
+  - `SKU` / `CODE`: Product SKU or Part Number for catalog matching.
+  - `BARCODE`: Product EAN/UPC barcode (registered in Bitrix catalog).
+  - `PURCHASE_PRICE`: Unit cost / purchase price recorded on the arrival document.
+  - `SALES_PRICE`: Commercial catalog base selling price (updated via `catalog.price.*`).
+  - `QUANTITY_ARRIVED` *(Required)*: Units received in this arrival batch.
+  - `WAREHOUSE`: Target destination store (matched by warehouse title or integer ID).
+  - `QUANTITY_DESTINATION`: Total current stock level reference.
+  - `TOTAL`: Line item total valuation (`Quantity Arrived × Purchase Price`).
+- **Synchronized Catalog + Inventory Execution:**
+  1. **Product Catalog Sync:** Matches existing products by `CODE`/`XML_ID` or exact `NAME`. In `CREATE_UPDATE` or `CREATE_ONLY` mode, creates missing catalog items with title, barcode, and base sales price.
+  2. **Inventory Stock Receipt Document:** Creates an official Bitrix24 Arrival document (`catalog.document.add` with `docType: 'A'`).
+  3. **Line Element Registration:** Attaches each arrived line item via `catalog.document.element.add` referencing the catalog product ID, destination warehouse ID (`storeTo`), arrival quantity (`amount`), and unit purchase price (`purchasingPrice`).
+  4. **Document Conducting:** Automatically posts/conducts the receipt document via `catalog.document.conduct`, officially crediting real-time inventory balances into the destination warehouse.
+  5. **Direct Store Fallback:** If document conduction is restricted by portal permissions, gracefully updates store stock balances via `catalog.storeproduct.update` or `catalog.product.update` so counts are never lost.
+- **Mode Selection:** `Create + Update` (recommended), `Create Only`, or `Update Only`.
+
+### 3.7 BullMQ Asynchronous Processing Pipeline
+- **Queue Architecture:** [`importQueue`](backend/src/queues/import.queue.ts) offloads long-running processing to an asynchronous worker.
+- **Controlled Concurrency:** [`import.worker.ts`](backend/src/services/import/import.worker.ts) executes record syncs using a bounded concurrency pool (default 5 concurrent Bitrix requests) to prevent API throttling.
+- **Crash Recovery & Reconciliation:** If the server is abruptly stopped during processing, any records left in `PROCESSING` or `PENDING` are reconciled and marked for retry so no job is stranded.
+- **Automatic Upload Cleanup:** When a job completes or fails, the uploaded staging file in `uploads/` is deleted from disk.
+
+### 3.8 Import Tracking, Error Reporting & Retry Engine
+- **Import History (`/imports`):** Search, filter by status (`PENDING`, `PROCESSING`, `COMPLETED`, `COMPLETED_WITH_ERRORS`, `FAILED`), and view completion timestamps.
+- **Import Details (`/imports/:id`):**
+  - Summary progress card and status breakdown chart.
+  - Displays Bitrix Stock Receipt Document ID with quick reference when available.
+  - Detailed errors table listing every failed row number, SKU/Invoice No, and the Bitrix API error message.
+- **Excel Error Report Download:** Generates an `.xlsx` file on-the-fly containing `Row | SKU | Product | Status | Error`.
+- **One-Click Retry:** The **Retry Failed Records** button resets `FAILED` and `PARTIAL_FAILURE` records back to `PENDING` and re-submits the job to BullMQ without creating duplicates of already successful rows.
+
+### 3.9 Live Diagnostic Debug Console (`/debug`)
+- **Internal Audit Logging:** [`DebugLogService`](backend/src/services/debug/debugLog.service.ts) logs operational events into the PostgreSQL `DebugLog` table.
+- **Sources Tracked:** `API`, `AUTH`, `SETTINGS`, `BITRIX`, `IMPORT`, `WORKER`, `SYSTEM`.
+- **Real-Time Log Stream:** Auto-refreshes every 3 seconds with expandable JSON metadata for payloads, durations, HTTP response codes, and error traces.
+- **Log Management:** Text search filter, log level filter (`ERROR`, `WARN`, `INFO`, `DEBUG`), and a "Clear Logs" action.
+
+### 3.10 Admin Dashboard (`/dashboard`)
+- **Aggregate KPIs:** Total imports run, total rows processed, successful records, failed records, and skipped records.
+- **Bitrix Connection Widget:** Live indicator of current portal integration health and last-tested timestamp.
+- **Recent Imports Table:** Quick-access list showing the latest 10 import jobs with real-time status badges.
+
+---
+
+## 4. Database Architecture (Prisma Schema)
+
+```
+┌─────────────────────────────────┐       ┌─────────────────────────────────┐
+│              User               │       │       BitrixConfiguration       │
+├─────────────────────────────────┤       ├─────────────────────────────────┤
+│ id: UUID (PK)                   │       │ id: UUID (PK)                   │
+│ email: String (Unique)          │       │ portalUrl: String               │
+│ passwordHash: String            │       │ webhookUrlEncrypted: String     │
+│ role: String                    │       │ isActive: Boolean               │
+│ createdAt / updatedAt           │       │ connectionStatus: String        │
+└───────────────┬─────────────────┘       │ lastTestedAt: DateTime?         │
+                │ 1                       └─────────────────────────────────┘
+                │
+                │ creates
+                ▼ N
+┌─────────────────────────────────┐       ┌─────────────────────────────────┐
+│            ImportJob            │ 1   N │          ImportRecord           │
+├─────────────────────────────────┼───────┼─────────────────────────────────┤
+│ id: UUID (PK)                   │       │ id: UUID (PK)                   │
+│ fileName: String                │       │ importJobId: UUID (FK)          │
+│ filePath: String                │       │ rowNumber: Int                  │
+│ importMode: String              │       │ sku: String?                    │
+│ type: String                    │       │ productName: String?            │
+│   (PRODUCTS / INVOICES /        │       │ status: String                  │
+│    STOCK_RECEIPTS)              │       │ bitrixProductId: String?        │
+│ bitrixDocumentId: String?       │       │ bitrixDocumentId: String?       │
+│ status: String                  │       │ warehouseId: Int?               │
+│ totalRows / processedRows       │       │ quantityArrived: Float?         │
+│ successfulRows / failedRows     │       │ purchasePrice: Float?           │
+│ mappingJson: Json?              │       │ salesPrice: Float?              │
+│ startedAt / completedAt         │       │ errorMessage / bitrixError      │
+│ createdAt: DateTime             │       │ rawData: Json?                  │
+└─────────────────────────────────┘       └─────────────────────────────────┘
+
+┌─────────────────────────────────┐       ┌─────────────────────────────────┐
+│          ColumnMapping          │       │            DebugLog             │
+├─────────────────────────────────┼───────┼─────────────────────────────────┤
+│ id: UUID (PK)                   │       │ id: UUID (PK)                   │
+│ name: String                    │       │ level: String (INFO/WARN/ERROR) │
+│ mappingJson: Json?              │       │ source: String (API/BITRIX/etc) │
+│ createdById: UUID (FK User)     │       │ message: String                 │
+│ createdAt / updatedAt           │       │ details: Json?                  │
+└─────────────────────────────────┘       │ createdAt: DateTime             │
+                                          └─────────────────────────────────┘
 ```
 
 ---
 
-## Environment Variables
+## 5. Bitrix24 REST API Integration Reference
 
-### Backend (`.env.example`)
+Only official Bitrix24 REST API methods are called:
 
-| Variable                | Default                          | Description                                  |
-|-------------------------|----------------------------------|----------------------------------------------|
-| `NODE_ENV`              | `development`                    | Runtime env                                  |
-| `PORT`                  | `5000`                           | Backend port                                 |
-| `DATABASE_URL`          | `postgresql://postgres:postgres@postgres:5432/bitrix_inventory` | Prisma connection string |
-| `REDIS_URL`             | `redis://redis:6379`             | Redis connection string                      |
-| `JWT_SECRET`            | `change-me`                      | Secrets for auth tokens                      |
-| `ADMIN_EMAIL`           | `admin@system.com`               | Seed admin email                             |
-| `ADMIN_PASSWORD`        | `Admin@123456`                   | Seed admin password                          |
-| `BITRIX_ENCRYPTION_KEY` | `change-me`                      | AES key for webhook encryption               |
-| `MAX_FILE_SIZE_MB`      | `10`                             | Max Excel upload size                        |
-| `BITRIX_CONCURRENCY`    | `5`                              | Parallel Bitrix requests                     |
-| `BITRIX_MAX_RETRIES`    | `3`                              | Retries for Bitrix failures                  |
-| `BITRIX_REQUEST_TIMEOUT`| `30000`                          | Bitrix request timeout (ms)                  |
-| `BATCH_SIZE`            | `50`                             | Records fetched per worker batch |
-| `COOKIE_SECURE`         | `true` in prod / `false` in dev  | Sets the `Secure` flag on the auth cookie; set to `false` when serving over plain HTTP (docker-compose passes `false`) |
-
-> **Important:** `BITRIX_WEBHOOK_URL` should **not** be in `.env` for normal operation. The webhook is configured through the **admin dashboard** and stored **encrypted** in PostgreSQL.
-
-### Docker Compose
-
-Create a `.env` file at the project root to override compose defaults:
-
-```bash
-POSTGRES_PASSWORD=change-me
-JWT_SECRET=change-me-to-a-long-random-string
-BITRIX_ENCRYPTION_KEY=a-32-character-encryption-key-here
-ADMIN_EMAIL=admin@system.com
-ADMIN_PASSWORD=Admin@123456
-```
+| Domain | Bitrix Method | Purpose |
+|---|---|---|
+| **System** | `scope` / `profile` | Webhook connectivity and permission verification |
+| **Catalog** | `catalog.catalog.list` | Resolves primary commercial catalog ID |
+| **Price** | `catalog.priceType.list` | Resolves base price type (`catalogGroupId`) |
+| **Price** | `catalog.price.list` | Looks up existing price for a product |
+| **Price** | `catalog.price.add` / `.update` | Inserts or updates base price values |
+| **Currency** | `crm.currency.list` | Resolves the portal's active base currency |
+| **Product** | `catalog.product.getFields` | Discovers catalog schema and product field definitions |
+| **Product** | `catalog.product.list` | Idempotent lookup by SKU / `CODE` / `XML_ID` or product name |
+| **Product** | `catalog.product.add` | Creates missing catalog products (with barcode & prices) |
+| **Product** | `catalog.product.update` | Updates existing products and sets product quantities |
+| **Stores** | `catalog.store.list` | Lists available warehouses / stores |
+| **Stock Receipt** | `catalog.document.element.getFields` | Discovers document line item fields (amount, purchasingPrice, storeTo) |
+| **Stock Receipt** | `catalog.document.add` | Creates official arrival stock receipt document (`docType: 'A'`) |
+| **Stock Receipt** | `catalog.document.element.add` | Adds line items with product ID, arrival qty, destination store, & purchase price |
+| **Stock Receipt** | `catalog.document.conduct` | Officially conducts/posts arrival document into warehouse inventory |
+| **Store Balance** | `catalog.storeproduct.update` | Updates physical store inventory balances directly (permission fallback) |
+| **Invoice** | `crm.invoice.list` | Searches existing invoices by `ACCOUNT_NUMBER` |
+| **Invoice** | `crm.invoice.add` | Creates new classic CRM invoices |
+| **Invoice** | `crm.invoice.update` | Updates invoice values and payment status |
+| **Batch** | `batch` | Bulk execution support |
 
 ---
 
-## Admin Login
-
-1. Open `http://localhost:3000`
-2. Log in with the seeded admin credentials (or yours via env vars)
-3. First configure **Bitrix Configuration** in the sidebar
-4. Then go to **Inventory Import**
-
----
-
-## Bitrix Configuration
-
-The dashboard → **Bitrix Configuration** page lets the admin:
-
-1. **Save Configuration** — stores the portal URL and webhook URL.
-   - The webhook is **encrypted** with AES-256-GCM using `BITRIX_ENCRYPTION_KEY` before storage.
-   - The webhook token is **never** returned by the API or shown in the UI.
-2. **Test Connection** — calls a safe Bitrix endpoint, verifies the response, and stores the result as `CONNECTED` / `FAILED`.
-3. Connection status and last-tested time are displayed.
-
-### Webhook Format
-
-A Bitrix24 **inbound webhook** looks like:
-
-```
-https://your-company.bitrix24.com/rest/1/abc123secret/
-```
-
-Generate it in Bitrix24: **Application → Webhooks → Inbound webhook**.
-
----
-
-## Excel Format
-
-Download the template from the dashboard (**Download Excel Template**), or use any file with these minimum columns:
-
-| SKU    | Product Name | Quantity | Price | Barcode           |
-|--------|--------------|---------:|------:|-------------------|
-| 000123 | Product A    |      100 |   500 | 8901234567890     |
-| 000124 | Product B    |      250 |   700 | 8901234567891     |
-
-**Supported formats:** `.xlsx`, `.xls`, `.csv` (max size configurable, default 10 MB).
-
-**Leading zeros are preserved.** SKU `000123` stays `000123` — identifiers are never coerced into JavaScript numbers.
-
-> Refer to the referenced **Bitrix24 field schema** for the catalog/product/inventory field references. CRM/company fields (`UF_CRM_*`) are **not** used for inventory/product import.
-
----
-
-## Invoice Import
-
-The **Invoice Import** page (`/invoices/import`) imports an Excel/CSV of invoices into Bitrix24's classic invoice entity (`crm.invoice.*`).
-
-| Excel Column      | Bitrix Field                 |
-|-------------------|------------------------------|
-| Invoice No        | `ACCOUNT_NUMBER` (match key) |
-| Subject           | `ORDER_TOPIC`                |
-| Customer / Client | `CLIENT`                     |
-| Amount            | `PRICE`                      |
-| Currency          | `CURRENCY`                   |
-| Status            | `STATUS_ID`                  |
-| Invoice Date      | `DATE_BILL`                  |
-| Due Date          | `DATE_PAY_BEFORE`            |
-| Notes             | `COMMENT`                    |
-
-Statuses map to Bitrix invoice statuses: `N` New, `S` Sent, `P` Paid (→ `PAYED=Y`), `D` Unpaid.
-
-Flow: upload → preview → map columns → confirm → queued and processed by the same worker pipeline (the job `type` is stored on the import record).
-
-- **Existing invoices are matched by Invoice Number and UPDATEd** with the new values (in `CREATE_UPDATE` / `UPDATE_ONLY` modes).
-- New invoices are **created** via `crm.invoice.add` when the webhook user has invoice permission.
-- Missing invoice permission surfaces as a per-record `FAILED` with a clear, actionable message (no silent skips).
-
-> **Note:** `crm.invoice.getFields` is not available on most portals, so the mapped field list is a fixed, supported subset. If creation reports *access denied*, grant the webhook's user **Invoices** access in Bitrix24 (CRM → Invoices permissions) — updates to existing invoices require the same permission on most plans.
-
-Sample file: `sample-data/invoices_sample.csv`.
-
----
-
-## Column Mapping
-
-The import wizard automatically suggests mappings for common fields:
-
-| Excel Column  | Bitrix Field                 |
-|---------------|------------------------------|
-| SKU           | Product Code (`CODE`)        |
-| Product Name  | Name (`NAME`)                |
-| Quantity      | Stock Quantity (`QUANTITY`)  |
-| Price         | Base Price (`PRICE`)         |
-| Barcode       | Barcode (`BARCODE`)          |
-
-Automatic mapping can be reviewed/adjusted with dropdowns before import. Bitrix fields are loaded dynamically from your connected Bitrix portal via `catalog.product.getFields` and `catalog.storeproduct.getFields`.
-
----
-
-## Import Process
-
-1. **Upload** the Excel/CSV file.
-2. **Preview** the data (file info, headers, first 50 rows).
-3. **Map columns** to Bitrix fields.
-4. **Validate** — per-row validation plus duplicate-SKU detection:
-   ```
-   Row 14: SKU is required.
-   Row 25: Quantity must be numeric.
-   Row 31: Price cannot be negative.
-   Duplicate SKU ABC001 found in rows 2 and 15.
-   ```
-5. **Confirm** — summary of total/valid/invalid rows and the **Import Mode**:
-   - `Create + Update` (default): create missing, update existing.
-   - `Create Only`: only create missing products.
-   - `Update Only`: only update existing products.
-6. **Import** — the job is queued in Redis (BullMQ) and processed by a background worker with controlled concurrency.
-7. **Result** — live progress (processed/successful/failed/skipped), then Import Details.
-
-### Idempotency & Failure Recovery
-
-- Products are matched by **SKU/product code/XML_ID** before any create, so re-importing never duplicates Bitrix products.
-- Import state lives in PostgreSQL. If the worker crashes, records stay `PROCESSING`/`PENDING` and are re-processed on restart without duplicating success.
-- `CREATE_UPDATE` + existing product → **update** (never duplicate).
-
----
-
-## Retry Process
-
-On **Import Details** (`/imports/:id`):
-
-- **Download Error Report** – Excel file with columns `Row | SKU | Product | Status | Error`.
-- **Retry Failed Records** – re-queues `FAILED` / `PARTIAL_FAILURE` **and** any records left `PENDING` by an interrupted run. Successful records are never duplicated.
-
-If product creation succeeded but an optional field (e.g. price) could not be written, the record is marked `PARTIAL_FAILURE` (with the Bitrix product ID stored) so a retry updates it without creating another product.
-
-> **Stock quantities:** some Bitrix24 plans ignore `quantity` writes via REST (`catalog.storeproduct.*` unavailable, `catalog.product.update` silently discards it). The worker probes this once per portal; on unsupported portals the field is skipped and rows still report `SUCCESS` (product + price are synced).
-
----
-
-## API Documentation
+## 6. REST API Endpoints Reference
 
 Base URL: `http://localhost:5000/api`
 
-### Authentication
-| Method | Endpoint              | Description                          |
-|--------|-----------------------|--------------------------------------|
-| POST   | `/auth/login`         | Login (sets HTTP-only cookie + returns token) |
-| POST   | `/auth/logout`        | Logout (clears cookie)               |
-| GET    | `/auth/me`            | Current user                         |
+### Authentication (`/api/auth`)
+- `POST /api/auth/login` — Authenticate admin, returns user data and sets HTTP-only cookie.
+- `POST /api/auth/logout` — Clears authentication cookie.
+- `GET /api/auth/me` — Fetches current authenticated session.
 
-### Dashboard
-| Method | Endpoint            | Description                          |
-|--------|---------------------|--------------------------------------|
-| GET    | `/dashboard/stats`  | Aggregate statistics + recent imports|
+### Dashboard (`/api/dashboard`)
+- `GET /api/dashboard/stats` — Overall totals, Bitrix connection status, and recent imports list.
 
-### Bitrix Settings
-| Method | Endpoint                    | Description                                  |
-|--------|-----------------------------|----------------------------------------------|
-| GET    | `/settings/bitrix`          | Current config (no webhook token exposed)    |
-| POST   | `/settings/bitrix`          | Create/overwrite config (encrypts webhook)   |
-| PUT    | `/settings/bitrix`          | Update config                                |
-| DELETE | `/settings/bitrix`          | Deactivate config                            |
-| POST   | `/settings/bitrix/test`     | Test connection, store status                |
+### Bitrix Settings (`/api/settings`)
+- `GET /api/settings/bitrix` — Returns configured portal URL and connection status (encrypted token hidden).
+- `POST /api/settings/bitrix` — Saves/replaces portal URL and webhook (encrypts with AES-256-GCM).
+- `PUT /api/settings/bitrix` — Updates existing settings.
+- `DELETE /api/settings/bitrix` — Deactivates active configuration.
+- `POST /api/settings/bitrix/test` — Performs live connection test against Bitrix.
 
-### Bitrix Discovery
-| Method | Endpoint                 | Description                       |
-|--------|--------------------------|-----------------------------------|
-| GET    | `/bitrix/catalogs`       | List connected catalogs           |
-| GET    | `/bitrix/products/fields`| Product field schema              |
-| GET    | `/bitrix/inventory/fields`| Inventory/store field schema     |
-| GET    | `/bitrix/invoice-fields` | Invoice field schema + statuses   |
+### Bitrix Discovery (`/api/bitrix`)
+- `GET /api/bitrix/catalogs` — Lists portal commercial catalogs.
+- `GET /api/bitrix/products/fields` — Returns Bitrix product field schema.
+- `GET /api/bitrix/inventory/fields` — Returns inventory/store field schema.
+- `GET /api/bitrix/stores` — Lists warehouses/stores.
+- `GET /api/bitrix/stock-receipt-fields` — Dynamically discovers available stock receipt arrival fields, catalog fields, and warehouse stores.
+- `GET /api/bitrix/invoice-fields` — Returns supported invoice field definitions and statuses.
 
-### Imports
-| Method | Endpoint                        | Description                              |
-|--------|---------------------------------|------------------------------------------|
-| POST   | `/imports/upload`               | Upload Excel/CSV (multer, validated)     |
-| POST   | `/imports/preview`              | Parse + preview file                     |
-| POST   | `/imports`                      | Create import job + queue for processing |
-| GET    | `/imports`                      | List imports (filter + pagination)       |
-| GET    | `/imports/:id`                  | Import details + status counts           |
-| GET    | `/imports/:id/errors`           | Failed records                           |
-| GET    | `/imports/:id/error-report`     | Download error report (Excel)            |
-| POST   | `/imports/:id/retry`            | Re-queue failed records                  |
-| GET    | `/imports/template`             | Download Excel template                  |
+### Imports Engine (`/api/imports`)
+- `POST /api/imports/upload` — Uploads raw file (`multipart/form-data`) into staging.
+- `POST /api/imports/preview` — Parses file and returns headers, row counts, and preview sample.
+- `POST /api/imports` — Validates rows, creates `ImportJob` & `ImportRecord`s, and queues job (`type`: `PRODUCTS`, `INVOICES`, `STOCK_RECEIPTS`).
+- `GET /api/imports` — Paginated list of import jobs with optional status filter.
+- `GET /api/imports/:id` — Import job details with status counts.
+- `GET /api/imports/:id/errors` — Lists failed records for an import job.
+- `GET /api/imports/:id/error-report` — Downloads an Excel file containing all failed records.
+- `POST /api/imports/:id/retry` — Re-queues failed/partial records back to `PENDING`.
+- `GET /api/imports/template` — Downloads sample Excel template with standard columns.
 
-### Health
-| Method | Endpoint  | Description                                  |
-|--------|-----------|----------------------------------------------|
-| GET    | `/health` | `{ status, database, redis }`                |
+### Debug & Health (`/api/debug`, `/health`)
+- `GET /api/debug/logs` — Query diagnostic logs (level, source, search, pagination).
+- `GET /api/debug/stats` — Summary counts by log level and source.
+- `DELETE /api/debug/logs` — Clears all diagnostic logs.
+- `GET /health` — Health check endpoint verifying PostgreSQL and Redis connections.
 
-### Response Format
-```json
-{ "success": true, "data": { } }
-{ "success": false, "message": "Validation failed", "errors": [] }
+---
+
+## 7. Configuration & Environment Variables
+
+Copy `.env.example` to `.env` in the root folder for Docker Compose or in `backend/.env` for manual execution:
+
+| Variable | Default (Dev) | Description |
+|---|---|---|
+| `PORT` | `5000` | Port for the Express backend server |
+| `NODE_ENV` | `development` | Environment mode (`development` or `production`) |
+| `DATABASE_URL` | `postgresql://postgres:postgres@localhost:5432/bitrix_inventory` | PostgreSQL connection string |
+| `REDIS_URL` | `redis://localhost:6379` | Redis connection string for BullMQ |
+| `JWT_SECRET` | *(Required)* | Secret key used for signing JWT cookies |
+| `ADMIN_EMAIL` | `admin@system.com` | Default email for seeded administrator |
+| `ADMIN_PASSWORD` | `Admin@123456` | Default password for seeded administrator |
+| `BITRIX_ENCRYPTION_KEY` | *(Required 32-char)* | Secret key used for AES-256-GCM webhook encryption |
+| `MAX_FILE_SIZE_MB` | `10` | Maximum allowed file upload size |
+| `BITRIX_CONCURRENCY` | `5` | Maximum parallel calls to Bitrix per worker batch |
+| `BITRIX_MAX_RETRIES` | `3` | Max retries when encountering Bitrix rate limits |
+| `BITRIX_REQUEST_TIMEOUT`| `30000` | Timeout in ms for outbound Bitrix REST calls |
+| `BATCH_SIZE` | `50` | Number of database records processed per worker batch |
+| `COOKIE_SECURE` | `false` (plain HTTP) | Set to `true` when running over HTTPS / TLS |
+
+---
+
+## 8. Deployment & Getting Started
+
+### 8.1 Quick Start with Docker
+
+Docker Compose runs the entire stack in isolated containers with health checks:
+
+1. **Create root `.env`:**
+   ```bash
+   cp .env.example .env
+   ```
+2. **Build and start the containers:**
+   ```bash
+   docker compose up -d --build
+   ```
+3. **Verify running containers:**
+   ```bash
+   docker compose ps
+   ```
+   You should see 4 healthy containers:
+   - `bitrix_inventory_postgres` (Port 5432)
+   - `bitrix_inventory_redis` (Port 6379)
+   - `bitrix_inventory_backend` (Port 5000)
+   - `bitrix_inventory_frontend` (Port 3000)
+
+4. **Access the application:**
+   - Open [http://localhost:3000](http://localhost:3000)
+   - Login with:
+     - **Email:** `admin@system.com`
+     - **Password:** `Admin@123456`
+   - Navigate to **Bitrix Configuration** to set your webhook URL.
+
+---
+
+### 8.2 Local Development Setup
+
+If running directly on your host machine:
+
+#### Prerequisites
+- Node.js 18+
+- PostgreSQL running locally on port `5432`
+- Redis running locally on port `6379`
+
+#### 1. Setup Backend
+```bash
+cd backend
+cp .env.example .env
+# Edit .env to verify DATABASE_URL and REDIS_URL point to localhost
+npm install
+npx prisma migrate dev
+npx prisma db seed
+npm run dev
+# Backend starts at http://localhost:5000
+```
+
+#### 2. Setup Frontend
+```bash
+cd frontend
+npm install
+npm run dev
+# Frontend starts at http://localhost:3000 (or http://localhost:5173)
 ```
 
 ---
 
-## Bitrix API Methods Used
+## 9. Known Platform Considerations & Limitations
 
-Only real Bitrix24 REST methods are used (no invented endpoints):
-
-| Purpose                  | Bitrix method                     |
-|--------------------------|-----------------------------------|
-| Catalog discovery        | `catalog.catalog.list`            |
-| Product field schema     | `catalog.product.getFields`       |
-| Inventory field schema   | `catalog.storeproduct.getFields`  |
-| List stores              | `catalog.store.list`              |
-| Search product by code   | `catalog.product.list` (filter CODE/XML_ID) |
-| Create product           | `catalog.product.add`             |
-| Update product           | `catalog.product.update`          |
-| Update store stock       | `catalog.storeproduct.add` / `.update` |
-| Connection test          | `profile`                         |
-
-**Invoice import (classic invoice entity):**
-| Purpose                  | Bitrix method                     |
-|--------------------------|-----------------------------------|
-| Search invoice by number | `crm.invoice.list` (filter `ACCOUNT_NUMBER`) |
-| Create invoice           | `crm.invoice.add`                 |
-| Update invoice           | `crm.invoice.update`              |
-| Invoice status values    | `crm.status.list` (`ENTITY_ID = INVOICE_STATUS`) |
-
-If a capability isn't available on your installation, the error is stored per record (never silently ignored) and the webhook is never exposed in messages.
-
----
-
-## Security
-
-- **Helmet** security headers, rate limiting.
-- **HTTP-only cookie** JWT auth (no tokens in localStorage).
-- **bcrypt** password hashing.
-- **AES-256-GCM** encryption for the Bitrix webhook (`BITRIX_ENCRYPTION_KEY`).
-- Webhook never returned by the API, never logged, not stored in git or `.env`.
-- **File validation** (extensions, size, path-traversal protection).
-- Structured logging with secrets redacted (`pino`).
-- Input validation with **Zod** across all endpoints.
-
----
-
-## Production Deployment
-
-```bash
-# 1. Set production secrets
-export JWT_SECRET=...
-export BITRIX_ENCRYPTION_KEY=...
-export POSTGRES_PASSWORD=...
-export ADMIN_EMAIL=...
-export ADMIN_PASSWORD=...
-
-# 2. Build and run
-docker compose up -d --build
-
-# 3. Verify
-docker compose ps
-curl http://localhost:5000/health
-```
-
-### Hardening checklist
-- Change `JWT_SECRET` and `BITRIX_ENCRYPTION_KEY` to long random values.
-- Set strong `POSTGRES_PASSWORD`.
-- Use HTTPS in front of nginx (TLS termination).
-- Restrict exposed ports (5432/6379) to internal networks only.
-- Keep `NODE_ENV=production`.
-
----
-
-## Troubleshooting
-
-### Prisma / OpenSSL errors in Docker
-The backend image is Debian-based (`node:20-slim`) with OpenSSL installed, and the Prisma schema pins `binaryTargets = ["native", "debian-openssl-3.0.x"]`. If you change base images, regenerate Prisma:
-```bash
-npx prisma generate
-docker compose build backend
-```
-
-### Backend can't reach Postgres/Redis
-The backend connects via service names (`postgres`, `redis`) inside the compose network — never `localhost`.
-
-### Migrations not applied
-```bash
-docker compose exec backend npx prisma migrate deploy
-```
-
-### Import jobs stuck in `PENDING` / `PROCESSING`
-The worker runs inside the backend container. Check logs:
-```bash
-docker logs bitrix_inventory_backend
-```
-Restart the backend — BullMQ re-processes pending records (idempotent by SKU).
-
-### Concerned the admin seed didn't run
-The backend auto-creates the admin user from `ADMIN_EMAIL`/`ADMIN_PASSWORD` at startup if it doesn't exist.
+1. **Bitrix Inventory Management (Warehouses / Store Stock):**
+   - On Bitrix24 commercial plans where **Inventory Management** is enabled, Bitrix restricts direct updates to the product's legacy `quantity` field via REST (`catalog.product.update`), expecting stock changes through store inventory documents (`catalog.document.*`) or store products (`catalog.storeproduct.*`).
+   - The middleware performs a test probe on the first quantity write. If the portal rejects direct quantity writes via REST, the system avoids failing the entire row, logs a diagnostic warning, and syncs the product name, code, and price.
+2. **Price Tiers:**
+   - The current product import engine syncs a single **Base Price** (`catalog.price.*`). If your Excel sheet contains multiple price columns (such as *Cost*, *Dealer Price*, and *End User Price*), you select which column maps to the primary Base Price.
+3. **Dynamic Custom Properties:**
+   - The product import wizard maps core properties (SKU, Name, Price, Quantity). Arbitrary custom user fields (`PROPERTY_*`) require configuring corresponding Bitrix catalog properties.
 
 ---
 
 ## License
 
-Internal project. Not licensed for redistribution.
+Internal proprietary software. All rights reserved.

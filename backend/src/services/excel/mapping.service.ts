@@ -120,6 +120,67 @@ export class MappingService {
     }
     return optional;
   }
+
+  autoMapStockReceipt(excelColumns: string[], bitrixFields: string[]): Record<string, string> {
+    const autoMapping: Record<string, string> = {};
+
+    excelColumns.forEach(col => {
+      const colLower = col.toLowerCase().trim();
+
+      // First check direct matches in bitrixFields or stock receipt fields
+      const direct = bitrixFields.find(f => f.toLowerCase() === colLower);
+      if (direct) {
+        autoMapping[col] = direct;
+        return;
+      }
+
+      // Keyword match against STOCK_RECEIPT_KEYWORD_MAP
+      let bestMatch: string | null = null;
+      let bestScore = 0;
+
+      for (const [targetField, keywords] of Object.entries(STOCK_RECEIPT_KEYWORD_MAP)) {
+        for (const kw of keywords) {
+          if (colLower === kw) {
+            bestScore = 1000;
+            bestMatch = targetField;
+            break;
+          }
+          if (colLower.includes(kw) || kw.includes(colLower)) {
+            const score = kw.length;
+            if (score > bestScore) {
+              bestScore = score;
+              bestMatch = targetField;
+            }
+          }
+        }
+        if (bestScore === 1000) break;
+      }
+
+      if (bestMatch) {
+        autoMapping[col] = bestMatch;
+      } else {
+        // Fallback to general fuzzy
+        const fuzzy = this.fuzzyMatchField(colLower, bitrixFields);
+        if (fuzzy) {
+          autoMapping[col] = fuzzy;
+        }
+      }
+    });
+
+    return autoMapping;
+  }
 }
+
+export const STOCK_RECEIPT_KEYWORD_MAP: Record<string, string[]> = {
+  'SKU': ['sku', 'product sku', 'product code', 'item code', 'code', 'part number', 'part no', 'part #', 'item #', 'reference', 'model', 'model no'],
+  'PRODUCT_NAME': ['product name', 'description', 'item description', 'product', 'title', 'name', 'item name', 'item'],
+  'BARCODE': ['barcode', 'bar code', 'ean', 'upc', 'gtin', 'item barcode'],
+  'PURCHASE_PRICE': ['purchase price', 'cost', 'cost price', 'buying price', 'buy price', 'unit cost', 'purchase rate', 'cost '],
+  'SALES_PRICE': ['sales price', 'sale price', 'selling price', 'dealer price', 'end user price', 'retail price', 'price', 'unit price', 'mrp', 'base price'],
+  'QUANTITY_ARRIVED': ['quantity arrived', 'qty arrived', 'arrived qty', 'quantity', 'qty', 'qty in stock', 'stock qty', 'received qty', 'received', 'quantity received', 'amount', 'in stock', 'stock'],
+  'WAREHOUSE': ['warehouse', 'store', 'location', 'destination warehouse', 'target warehouse', 'wh', 'store to'],
+  'QUANTITY_DESTINATION': ['quantity at destination', 'destination qty', 'qty destination', 'current stock', 'dest qty'],
+  'TOTAL': ['total', 'total cost', 'total amount', 'total price', 'amount total', 'net total'],
+};
 
 export const mappingService = new MappingService();

@@ -210,6 +210,125 @@ export class ExcelValidator {
       invalidCount: invalidRows.length,
     };
   }
+
+  validateStockReceipt(rows: ExcelRow[], mapping: StockReceiptMappingValidationFields): ValidationResult {
+    const validRows: ExcelRow[] = [];
+    const invalidRows: Array<ExcelRow & { _errors: string[] }> = [];
+    const errors: ValidationError[] = [];
+    const skuMap = new Map<string, number[]>();
+
+    rows.forEach(row => {
+      const rowNumber = Number(row._rowNumber);
+      const rowErrors: string[] = [];
+
+      const name = mapping.nameField ? this.getFieldValue(row, mapping.nameField) : undefined;
+      const sku = mapping.skuField ? this.getFieldValue(row, mapping.skuField) : undefined;
+      const quantityArrived = mapping.quantityArrivedField ? this.getFieldValue(row, mapping.quantityArrivedField) : undefined;
+      const purchasePrice = mapping.purchasePriceField ? this.getFieldValue(row, mapping.purchasePriceField) : undefined;
+      const salesPrice = mapping.salesPriceField ? this.getFieldValue(row, mapping.salesPriceField) : undefined;
+      const total = mapping.totalField ? this.getFieldValue(row, mapping.totalField) : undefined;
+      const quantityDestination = mapping.quantityDestinationField ? this.getFieldValue(row, mapping.quantityDestinationField) : undefined;
+
+      const hasName = name && String(name).trim() !== '';
+      const hasSku = sku && String(sku).trim() !== '';
+
+      if (!hasName && !hasSku) {
+        rowErrors.push('Either Product Name or SKU is required.');
+      }
+
+      if (quantityArrived === undefined || quantityArrived === '' || quantityArrived === null) {
+        rowErrors.push(`${mapping.quantityArrivedField || 'Quantity Arrived'} is required.`);
+      } else {
+        const qtyNum = Number(quantityArrived);
+        if (isNaN(qtyNum)) {
+          rowErrors.push(`${mapping.quantityArrivedField} must be numeric.`);
+        } else if (qtyNum < 0) {
+          rowErrors.push(`${mapping.quantityArrivedField} cannot be negative.`);
+        }
+      }
+
+      if (purchasePrice !== undefined && purchasePrice !== '' && purchasePrice !== null) {
+        const num = Number(purchasePrice);
+        if (isNaN(num)) {
+          rowErrors.push(`${mapping.purchasePriceField} must be numeric.`);
+        } else if (num < 0) {
+          rowErrors.push(`${mapping.purchasePriceField} cannot be negative.`);
+        }
+      }
+
+      if (salesPrice !== undefined && salesPrice !== '' && salesPrice !== null) {
+        const num = Number(salesPrice);
+        if (isNaN(num)) {
+          rowErrors.push(`${mapping.salesPriceField} must be numeric.`);
+        } else if (num < 0) {
+          rowErrors.push(`${mapping.salesPriceField} cannot be negative.`);
+        }
+      }
+
+      if (total !== undefined && total !== '' && total !== null) {
+        const num = Number(total);
+        if (isNaN(num)) {
+          rowErrors.push(`${mapping.totalField} must be numeric.`);
+        } else if (num < 0) {
+          rowErrors.push(`${mapping.totalField} cannot be negative.`);
+        }
+      }
+
+      if (quantityDestination !== undefined && quantityDestination !== '' && quantityDestination !== null) {
+        const num = Number(quantityDestination);
+        if (isNaN(num)) {
+          rowErrors.push(`${mapping.quantityDestinationField} must be numeric.`);
+        }
+      }
+
+      if (hasSku) {
+        const skuStr = String(sku).trim();
+        if (skuMap.has(skuStr)) {
+          skuMap.get(skuStr)!.push(rowNumber);
+        } else {
+          skuMap.set(skuStr, [rowNumber]);
+        }
+      }
+
+      if (rowErrors.length > 0) {
+        invalidRows.push({ ...row, _errors: rowErrors });
+        errors.push({ rowNumber, sku: sku ? String(sku) : undefined, errors: rowErrors });
+      } else {
+        validRows.push(row);
+      }
+    });
+
+    const duplicates: Array<{ sku: string; rows: number[] }> = [];
+    skuMap.forEach((rws, s) => {
+      if (rws.length > 1) {
+        duplicates.push({ sku: s, rows: rws });
+      }
+    });
+
+    return {
+      valid: invalidRows.length === 0,
+      validRows,
+      invalidRows,
+      errors,
+      duplicates,
+      totalRows: rows.length,
+      validCount: validRows.length,
+      invalidCount: invalidRows.length,
+    };
+  }
+}
+
+export interface StockReceiptMappingValidationFields {
+  skuField?: string;
+  nameField: string;
+  barcodeField?: string;
+  purchasePriceField?: string;
+  salesPriceField?: string;
+  quantityArrivedField: string;
+  warehouseField?: string;
+  quantityDestinationField?: string;
+  totalField?: string;
+  defaultStoreId?: number;
 }
 
 export const excelValidator = new ExcelValidator();

@@ -4,6 +4,7 @@ import Layout from './components/Layout';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import InventoryImport from './pages/InventoryImport';
+import StockReceiptImport from './pages/StockReceiptImport';
 import InvoiceImport from './pages/InvoiceImport';
 import ImportHistory from './pages/ImportHistory';
 import ImportDetails from './pages/ImportDetails';
@@ -30,6 +31,7 @@ export default function App() {
       <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
         <Route index element={<Navigate to="/dashboard" replace />} />
         <Route path="dashboard" element={<Dashboard />} />
+        <Route path="inventory/stock-receipt" element={<StockReceiptImport />} />
         <Route path="inventory/import" element={<InventoryImport />} />
         <Route path="invoices/import" element={<InvoiceImport />} />
         <Route path="imports" element={<ImportHistory />} />

@@ -2,7 +2,7 @@ import { Queue, Worker, Job } from 'bullmq';
 import { redisConnection } from '../config/redis';
 import { logger } from '../utils/logger';
 
-export type ImportType = 'PRODUCTS' | 'INVOICES';
+export type ImportType = 'PRODUCTS' | 'INVOICES' | 'STOCK_RECEIPTS';
 
 export interface ImportJobData {
   importJobId: string;

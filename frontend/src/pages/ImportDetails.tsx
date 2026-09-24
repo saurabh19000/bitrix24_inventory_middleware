@@ -118,12 +118,24 @@ export default function ImportDetails() {
           <div className="text-xs text-gray-500">Type</div>
           <div className="text-sm font-medium mt-1">
             <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${
-              importJob.type === 'INVOICES' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'
+              importJob.type === 'INVOICES'
+                ? 'bg-purple-100 text-purple-700'
+                : importJob.type === 'STOCK_RECEIPTS'
+                ? 'bg-indigo-100 text-indigo-700'
+                : 'bg-blue-100 text-blue-700'
             }`}>
-              {importJob.type === 'INVOICES' ? 'Invoices' : 'Products'}
+              {importJob.type === 'INVOICES' ? 'Invoices' : importJob.type === 'STOCK_RECEIPTS' ? 'Stock Receipt' : 'Products'}
             </span>
           </div>
         </div>
+        {importJob.bitrixDocumentId && (
+          <div className="card">
+            <div className="text-xs text-gray-500">Bitrix Document ID</div>
+            <div className="text-sm font-medium mt-1 text-indigo-600 font-mono">
+              #{importJob.bitrixDocumentId}
+            </div>
+          </div>
+        )}
         <div className="card">
           <div className="text-xs text-gray-500">Status</div>
           <div className="mt-1"><StatusBadge status={importJob.status} /></div>

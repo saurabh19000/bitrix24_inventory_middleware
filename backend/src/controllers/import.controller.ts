@@ -82,7 +82,8 @@ export class ImportController {
         type,
       } = req.body;
 
-      const importType = type === 'INVOICES' ? 'INVOICES' : 'PRODUCTS';
+      const importType: 'PRODUCTS' | 'INVOICES' | 'STOCK_RECEIPTS' =
+        type === 'INVOICES' ? 'INVOICES' : type === 'STOCK_RECEIPTS' ? 'STOCK_RECEIPTS' : 'PRODUCTS';
 
       if (!filePath || !fileName) {
         throw new AppError('filePath and fileName are required', 400);
@@ -106,19 +107,40 @@ export class ImportController {
         throw new AppError('An Invoice Number field mapping is required', 400);
       }
 
+      if (importType === 'STOCK_RECEIPTS' && (!mapping || (!mapping.nameField && !mapping.skuField))) {
+        throw new AppError('A Product Name or SKU field mapping is required for Stock Receipt', 400);
+      }
+
+      if (importType === 'STOCK_RECEIPTS' && (!mapping || !mapping.quantityArrivedField)) {
+        throw new AppError('A Quantity Arrived field mapping is required for Stock Receipt', 400);
+      }
+
       const fileStat = fs.statSync(resolvedPath);
       const parsed = await excelService.parseFile(resolvedPath, fileName, fileStat.size);
 
       // Validate all rows
       const validation = importType === 'INVOICES'
         ? excelValidator.validateInvoice(parsed.rows, mapping)
-        : excelValidator.validate(parsed.rows, {
-            skuField: mapping.skuField,
-            nameField: mapping.nameField,
-            quantityField: mapping.quantityField,
-            priceField: mapping.priceField,
-            barcodeField: mapping.barcodeField,
-          });
+        : importType === 'STOCK_RECEIPTS'
+          ? excelValidator.validateStockReceipt(parsed.rows, {
+              skuField: mapping.skuField,
+              nameField: mapping.nameField,
+              barcodeField: mapping.barcodeField,
+              purchasePriceField: mapping.purchasePriceField,
+              salesPriceField: mapping.salesPriceField,
+              quantityArrivedField: mapping.quantityArrivedField,
+              warehouseField: mapping.warehouseField,
+              quantityDestinationField: mapping.quantityDestinationField,
+              totalField: mapping.totalField,
+              defaultStoreId: mapping.defaultStoreId ? Number(mapping.defaultStoreId) : undefined,
+            })
+          : excelValidator.validate(parsed.rows, {
+              skuField: mapping.skuField,
+              nameField: mapping.nameField,
+              quantityField: mapping.quantityField,
+              priceField: mapping.priceField,
+              barcodeField: mapping.barcodeField,
+            });
 
       // Create import job
       const importJob = await prisma.importJob.create({
@@ -140,10 +162,19 @@ export class ImportController {
         rowNumber: Number(row._rowNumber),
         sku: importType === 'INVOICES'
           ? (row[mapping.accountNumberField] ? String(row[mapping.accountNumberField]) : null)
-          : (row[mapping.skuField] ? String(row[mapping.skuField]) : null),
+          : (mapping.skuField && row[mapping.skuField] ? String(row[mapping.skuField]) : null),
         productName: importType === 'INVOICES'
           ? (mapping.orderTopicField && row[mapping.orderTopicField] ? String(row[mapping.orderTopicField]) : null)
-          : (row[mapping.nameField] ? String(row[mapping.nameField]) : null),
+          : (mapping.nameField && row[mapping.nameField] ? String(row[mapping.nameField]) : null),
+        quantityArrived: importType === 'STOCK_RECEIPTS' && mapping.quantityArrivedField && row[mapping.quantityArrivedField] !== undefined && row[mapping.quantityArrivedField] !== ''
+          ? Number(row[mapping.quantityArrivedField])
+          : null,
+        purchasePrice: importType === 'STOCK_RECEIPTS' && mapping.purchasePriceField && row[mapping.purchasePriceField] !== undefined && row[mapping.purchasePriceField] !== ''
+          ? Number(row[mapping.purchasePriceField])
+          : null,
+        salesPrice: importType === 'STOCK_RECEIPTS' && mapping.salesPriceField && row[mapping.salesPriceField] !== undefined && row[mapping.salesPriceField] !== ''
+          ? Number(row[mapping.salesPriceField])
+          : null,
         status: 'PENDING',
         rawData: row as any,
       }));
@@ -153,35 +184,58 @@ export class ImportController {
       });
 
       // Queue the job
-      const queuePayload = importType === 'INVOICES' ? {
-        importJobId: importJob.id,
-        type: importType as 'INVOICES',
-        mapping: {
-          accountNumberField: mapping.accountNumberField,
-          orderTopicField: mapping.orderTopicField,
-          clientField: mapping.clientField,
-          amountField: mapping.amountField,
-          currencyField: mapping.currencyField,
-          statusField: mapping.statusField,
-          billDateField: mapping.billDateField,
-          dueDateField: mapping.dueDateField,
-          commentField: mapping.commentField,
-        },
-        importMode: (importMode || 'CREATE_UPDATE') as 'CREATE_ONLY' | 'CREATE_UPDATE' | 'UPDATE_ONLY',
-      } : {
-        importJobId: importJob.id,
-        type: 'PRODUCTS' as 'PRODUCTS',
-        mapping: {
-          skuField: mapping.skuField,
-          nameField: mapping.nameField,
-          quantityField: mapping.quantityField,
-          priceField: mapping.priceField,
-          barcodeField: mapping.barcodeField,
-        },
-        importMode: (importMode || 'CREATE_UPDATE') as 'CREATE_ONLY' | 'CREATE_UPDATE' | 'UPDATE_ONLY',
-      };
+      let queuePayload: any;
+      if (importType === 'STOCK_RECEIPTS') {
+        queuePayload = {
+          importJobId: importJob.id,
+          type: 'STOCK_RECEIPTS',
+          mapping: {
+            skuField: mapping.skuField,
+            nameField: mapping.nameField,
+            barcodeField: mapping.barcodeField,
+            purchasePriceField: mapping.purchasePriceField,
+            salesPriceField: mapping.salesPriceField,
+            quantityArrivedField: mapping.quantityArrivedField,
+            warehouseField: mapping.warehouseField,
+            quantityDestinationField: mapping.quantityDestinationField,
+            totalField: mapping.totalField,
+            defaultStoreId: mapping.defaultStoreId ? Number(mapping.defaultStoreId) : undefined,
+          },
+          importMode: (importMode || 'CREATE_UPDATE') as 'CREATE_ONLY' | 'CREATE_UPDATE' | 'UPDATE_ONLY',
+        };
+      } else if (importType === 'INVOICES') {
+        queuePayload = {
+          importJobId: importJob.id,
+          type: 'INVOICES',
+          mapping: {
+            accountNumberField: mapping.accountNumberField,
+            orderTopicField: mapping.orderTopicField,
+            clientField: mapping.clientField,
+            amountField: mapping.amountField,
+            currencyField: mapping.currencyField,
+            statusField: mapping.statusField,
+            billDateField: mapping.billDateField,
+            dueDateField: mapping.dueDateField,
+            commentField: mapping.commentField,
+          },
+          importMode: (importMode || 'CREATE_UPDATE') as 'CREATE_ONLY' | 'CREATE_UPDATE' | 'UPDATE_ONLY',
+        };
+      } else {
+        queuePayload = {
+          importJobId: importJob.id,
+          type: 'PRODUCTS',
+          mapping: {
+            skuField: mapping.skuField,
+            nameField: mapping.nameField,
+            quantityField: mapping.quantityField,
+            priceField: mapping.priceField,
+            barcodeField: mapping.barcodeField,
+          },
+          importMode: (importMode || 'CREATE_UPDATE') as 'CREATE_ONLY' | 'CREATE_UPDATE' | 'UPDATE_ONLY',
+        };
+      }
 
-      await importQueue.add('process-import', queuePayload as any, {
+      await importQueue.add('process-import', queuePayload, {
         attempts: 1,
         removeOnComplete: false,
         removeOnFail: false,
@@ -378,7 +432,7 @@ export class ImportController {
       // Re-queue
       await importQueue.add('process-import', {
         importJobId: id,
-        type: (importJob.type || 'PRODUCTS') as 'PRODUCTS' | 'INVOICES',
+        type: (importJob.type || 'PRODUCTS') as 'PRODUCTS' | 'INVOICES' | 'STOCK_RECEIPTS',
         mapping: importJob.mappingJson as any,
         importMode: (importJob.importMode as 'CREATE_ONLY' | 'CREATE_UPDATE' | 'UPDATE_ONLY') || 'CREATE_UPDATE',
       }, {

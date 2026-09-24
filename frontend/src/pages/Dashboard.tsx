@@ -58,7 +58,15 @@ export default function Dashboard() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
-        <Link to="/inventory/import" className="btn-primary text-sm">New Import</Link>
+        <div className="flex gap-2">
+          <Link to="/inventory/stock-receipt" className="btn-primary text-sm flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-700 text-white">
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
+            </svg>
+            Stock Receipt Import
+          </Link>
+          <Link to="/inventory/import" className="btn-secondary text-sm">Product Import</Link>
+        </div>
       </div>
 
       {/* Statistics cards */}

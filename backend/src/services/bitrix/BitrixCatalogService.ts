@@ -20,6 +20,7 @@ export interface CatalogContext {
   catalogName: string;
   basePriceTypeId: number;
   currency: string;
+  barcodePropertyId?: number;
 }
 
 // Map<webhookBaseUrl, Promise<context>> — resolve catalog/price-type/currency once per portal
@@ -161,11 +162,41 @@ async function resolveCatalogContext(client: BitrixClient): Promise<CatalogConte
         logger.warn('crm.currency.list unavailable, defaulting currency to INR');
       }
 
+      // Discover or ensure barcode property on catalog iblock
+      let barcodePropertyId: number | undefined;
+      try {
+        const props = await client.callMethod('crm.product.property.list', {});
+        const propList = Array.isArray(props) ? props : (props && props.result) || [];
+        const found = propList.find((p: any) => 
+          String(p.IBLOCK_ID) === String(mainCatalog.id) &&
+          (p.CODE?.toUpperCase() === 'BARCODE' || p.NAME?.toLowerCase() === 'barcode')
+        );
+        if (found) {
+          barcodePropertyId = Number(found.ID);
+        } else {
+          const addRes = await client.callMethod('crm.product.property.add', {
+            fields: {
+              NAME: 'Barcode',
+              CODE: 'BARCODE',
+              ACTIVE: 'Y',
+              SORT: 100,
+              PROPERTY_TYPE: 'S',
+              IBLOCK_ID: mainCatalog.id,
+            },
+          });
+          const newId = typeof addRes === 'number' ? addRes : addRes?.id || addRes?.ID || addRes?.result;
+          if (newId) barcodePropertyId = Number(newId);
+        }
+      } catch (err) {
+        logger.warn({ err }, 'Failed to resolve/create barcode property');
+      }
+
       return {
         catalogId: mainCatalog.id,
         catalogName: mainCatalog.name,
         basePriceTypeId: baseType.id,
         currency,
+        barcodePropertyId,
       };
     } catch (error) {
       contextCache.delete(key);
@@ -188,37 +219,107 @@ export class BitrixProductService {
 
   async findProductBySku(sku: string): Promise<any | null> {
     try {
+      const barcodeProp = this.context.barcodePropertyId ? `property${this.context.barcodePropertyId}` : undefined;
+      const select = ['id', 'iblockId', 'name', 'code', 'quantity'];
+      if (barcodeProp) select.push(barcodeProp);
+
       const result = await this.client.callMethod('catalog.product.list', {
-        select: ['id', 'iblockId', 'name', 'code', 'quantity'],
+        select,
         filter: { iblockId: this.context.catalogId, code: sku },
       });
       const products = (result && result.products) || [];
-      return products[0] || null;
+      if (!products[0]) return null;
+      const p = products[0];
+      let barcode = p.barcode;
+      if (!barcode && barcodeProp && p[barcodeProp]) {
+        barcode = typeof p[barcodeProp] === 'object' ? p[barcodeProp].value : p[barcodeProp];
+      }
+      return { ...p, barcode };
     } catch (error) {
       logger.warn({ err: error }, `Failed to search product by SKU ${sku}`);
       return null;
     }
   }
 
-  async createProduct(name: string, code: string): Promise<number> {
-    const result = await this.client.callMethod('catalog.product.add', {
-      fields: {
-        iblockId: this.context.catalogId,
-        name,
-        code,
-        active: 'Y',
-      },
-    });
+  async findProductByName(name: string): Promise<any | null> {
+    try {
+      const barcodeProp = this.context.barcodePropertyId ? `property${this.context.barcodePropertyId}` : undefined;
+      const select = ['id', 'iblockId', 'name', 'code', 'quantity'];
+      if (barcodeProp) select.push(barcodeProp);
+
+      const result = await this.client.callMethod('catalog.product.list', {
+        select,
+        filter: { iblockId: this.context.catalogId, name: name },
+      });
+      const products = (result && result.products) || [];
+      if (!products[0]) return null;
+      const p = products[0];
+      let barcode = p.barcode;
+      if (!barcode && barcodeProp && p[barcodeProp]) {
+        barcode = typeof p[barcodeProp] === 'object' ? p[barcodeProp].value : p[barcodeProp];
+      }
+      return { ...p, barcode };
+    } catch (error) {
+      return null;
+    }
+  }
+
+  async createProduct(name: string, code: string, barcode?: string): Promise<number> {
+    const fields: any = {
+      iblockId: this.context.catalogId,
+      name,
+      code,
+      active: 'Y',
+    };
+    if (barcode) {
+      fields.barcode = barcode;
+      if (this.context.barcodePropertyId) {
+        fields[`property${this.context.barcodePropertyId}`] = barcode;
+      }
+    }
+
+    const result = await this.client.callMethod('catalog.product.add', { fields });
     const element = result && (result.element || result.product);
     if (!element || !element.id) {
       throw new Error('Bitrix did not return a product ID after creation');
     }
+
+    if (barcode && this.context.barcodePropertyId) {
+      try {
+        await this.client.callMethod('crm.product.update', {
+          id: element.id,
+          fields: {
+            [`PROPERTY_${this.context.barcodePropertyId}`]: barcode,
+          },
+        });
+      } catch {
+        // non-blocking
+      }
+    }
+
     return element.id;
   }
 
   async updateProduct(id: number, fields: any): Promise<boolean> {
     try {
-      const result = await this.client.callMethod('catalog.product.update', { id, fields });
+      const payload = { ...fields };
+      if (payload.barcode && this.context.barcodePropertyId) {
+        payload[`property${this.context.barcodePropertyId}`] = payload.barcode;
+      }
+      const result = await this.client.callMethod('catalog.product.update', { id, fields: payload });
+
+      if (payload.barcode && this.context.barcodePropertyId) {
+        try {
+          await this.client.callMethod('crm.product.update', {
+            id,
+            fields: {
+              [`PROPERTY_${this.context.barcodePropertyId}`]: payload.barcode,
+            },
+          });
+        } catch {
+          // non-blocking
+        }
+      }
       return !!(result && (result.element || result.product));
     } catch (error) {
       logger.error({ err: error }, `Failed to update product ${id}`);

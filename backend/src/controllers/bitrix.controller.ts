@@ -2,6 +2,7 @@ import { Response, NextFunction } from 'express';
 import { BitrixClient } from '../services/bitrix/BitrixClient';
 import { BitrixCatalogService, BitrixProductService, BitrixInventoryService } from '../services/bitrix/BitrixCatalogService';
 import { BitrixInvoiceService } from '../services/bitrix/BitrixInvoiceService';
+import { BitrixStockReceiptService, STOCK_RECEIPT_CORE_FIELDS } from '../services/bitrix/BitrixStockReceiptService';
 import { AuthenticatedRequest } from '../types';
 import { logger } from '../utils/logger';
 import { AppError } from '../middleware/error.middleware';
@@ -70,6 +71,34 @@ export class BitrixController {
           statuses: BitrixInvoiceService.getStatusOptions(),
         },
       });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  async getStockReceiptFields(_req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+    try {
+      try {
+        const client = await BitrixClient.fromDbConfiguration();
+        const service = new BitrixStockReceiptService(client);
+        const discovery = await service.getDiscoveryFields();
+        res.json({
+          success: true,
+          data: discovery,
+        });
+      } catch (err: any) {
+        logger.info({ msg: err.message }, 'Returning default stock receipt fields (Bitrix offline or unconfigured)');
+        res.json({
+          success: true,
+          data: {
+            stockReceiptFields: STOCK_RECEIPT_CORE_FIELDS,
+            catalogFields: [],
+            stores: [],
+            currency: 'USD',
+            configured: false,
+          },
+        });
+      }
     } catch (error) {
       next(error);
     }

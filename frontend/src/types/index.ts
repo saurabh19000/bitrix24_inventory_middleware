@@ -38,6 +38,7 @@ export interface ImportJob {
   failedRows: number;
   skippedRows: number;
   mappingJson?: any;
+  bitrixDocumentId?: string;
   startedAt?: string;
   completedAt?: string;
   createdAt: string;
@@ -55,11 +56,38 @@ export interface ImportRecord {
   productName?: string;
   status: string;
   bitrixProductId?: string;
+  bitrixDocumentId?: string;
+  warehouseId?: number;
+  quantityArrived?: number;
+  purchasePrice?: number;
+  salesPrice?: number;
   errorMessage?: string;
   bitrixError?: string;
   rawData?: any;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface StockReceiptField {
+  id: string;
+  name: string;
+  type: string;
+  isRequired: boolean;
+  isCore?: boolean;
+}
+
+export interface BitrixStore {
+  id: number;
+  title: string;
+  address?: string;
+  active?: string;
+}
+
+export interface StockReceiptDiscovery {
+  stockReceiptFields: StockReceiptField[];
+  catalogFields: StockReceiptField[];
+  stores: BitrixStore[];
+  currency: string;
 }
 
 export interface ImportPreview {
